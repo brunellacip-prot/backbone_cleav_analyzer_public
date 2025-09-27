@@ -589,7 +589,7 @@ def summarize_peptides_with_stats(df, uniprot_ids, output_path):
     summary_pivot = create_experiment_summary(prepared_df, uniprot_ids)
     
     # Step 3: Create peptide-level statistics with UniProt ID grouping
-    stats_df = create_peptide_level_stats(prepared_df, uniprot_ids)
+    stats_df = create_peptide_level_stats_corrected(prepared_df, uniprot_ids)
     
     # Step 4: Create global summaries
     global_summary, global_stats = create_global_summary(summary_pivot)
