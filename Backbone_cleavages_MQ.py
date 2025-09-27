@@ -407,9 +407,21 @@ def create_experiment_summary(df, uniprot_ids):
 
     return summary_pivot
 
-def create_peptide_level_stats(df, uniprot_ids):
+def create_peptide_level_stats_corrected(df, uniprot_ids):
     """
-    FIXED VERSION: Includes ALL peptide observations, not just unique sequences.
+    CORRECTED VERSION: Create peptide-level ratio statistics.
+    Now N equals the total number of observations (sum of tryptic + semitryptic).
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        Prepared DataFrame with peptide classifications
+    uniprot_ids : list
+        List of UniProt IDs to group by (e.g., ["P02668", "P02662", "P02666", "P02663"])
+        
+    Returns:
+    --------
+    pandas.DataFrame : Statistics per protein and sample group
     """
     # Step 1: Create copy and add UniProt ID mapping
     df_grouped = df.copy()
@@ -420,50 +432,72 @@ def create_peptide_level_stats(df, uniprot_ids):
     # Step 2: Filter out rows where no UniProt ID was matched
     df_grouped = df_grouped[df_grouped['Protein_ID'].notna()]
     
-    # Step 3: Create row-level identifier to keep ALL observations
+    # Check if we have any data after filtering
+    if df_grouped.empty:
+        print("Warning: No data remaining after UniProt ID filtering")
+        return pd.DataFrame()
+    
+    # Step 3: Reset index to create unique row identifier (keeps ALL observations)
     df_grouped = df_grouped.reset_index()
     
-    # Step 4: Create pivot with row index instead of sequence grouping
+    # Step 4: Create pivot table with row-level index (no sequence grouping!)
     peptide_level = df_grouped.pivot_table(
-        index=['Protein_ID', 'Sample Group', 'index'],  # ← Using row index keeps all observations
+        index=['Protein_ID', 'Sample Group', 'index'],  # Using row index keeps all observations
         columns='Peptide_Type',
         values='Product_Count_MSMS_Count',
         fill_value=0
     ).reset_index()
     
-    print(f"Fixed peptide-level shape: {peptide_level.shape}")
-    print("This now includes ALL peptide observations, not just unique sequences!")
+    # Step 5: Handle missing peptide type columns
+    for col in ['Tryptic', 'Semi-tryptic']:
+        if col not in peptide_level.columns:
+            peptide_level[col] = 0
     
-    # Step 5: Calculate ratio
-    if 'Semi-tryptic' in peptide_level.columns and 'Tryptic' in peptide_level.columns:
-        peptide_level['Semi-tryptic Peptides Ratio'] = peptide_level['Semi-tryptic'] / (
-            peptide_level['Tryptic'] + peptide_level['Semi-tryptic']
-        )
-    else:
-        print(f"Available columns: {list(peptide_level.columns)}")
-        # Handle case where we might not have both peptide types
-        available_cols = [col for col in ['Semi-tryptic', 'Tryptic'] if col in peptide_level.columns]
-        if available_cols:
-            total_col = sum(peptide_level[col] for col in available_cols)
-            if 'Semi-tryptic' in available_cols:
-                peptide_level['Semi-tryptic Peptides Ratio'] = peptide_level['Semi-tryptic'] / total_col
-            else:
-                peptide_level['Semi-tryptic Peptides Ratio'] = 0
-        else:
-            print("No peptide type columns found!")
-            return None
+    # Step 6: RATIO CALCULATION
+    total_peptides = peptide_level['Tryptic'] + peptide_level['Semi-tryptic']
     
-    # Step 6: Calculate statistics
+    # Validate that each row has exactly one non-zero peptide type
+    non_zero_count = (peptide_level['Tryptic'] > 0).astype(int) + (peptide_level['Semi-tryptic'] > 0).astype(int)
+    valid_rows = non_zero_count == 1
+    if not valid_rows.all():
+        print(f"Warning: {(~valid_rows).sum()} rows have inconsistent peptide types (should have exactly one non-zero type)")
+    
+    peptide_level['Semi-tryptic Peptides Ratio'] = np.where(
+        total_peptides > 0,
+        peptide_level['Semi-tryptic'] / total_peptides,  # This gives 0.0 or 1.0 only!
+        0
+    )
+
+    # Step 7: Calculate statistics per protein and sample group
+    # Mean of 0s and 1s = proportion of 1s = proportion of semi-tryptic peptides
     stats_df = peptide_level.groupby(['Protein_ID', 'Sample Group'])[
         'Semi-tryptic Peptides Ratio'
     ].agg(
-        Mean_Ratio='mean',
+        Mean_Ratio='mean',  # Mean of 0s and 1s = actual proportion!
         Std_Dev='std',
-        Std_Error=lambda x: x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 0 else np.nan,
-        N='count' #N represents ALL peptide observations data is based on
+        Std_Error=lambda x: x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else np.nan  # Need n>1 for std
     ).reset_index()
-        
+    
+    # Step 8: Add verification columns
+    verification = peptide_level.groupby(['Protein_ID', 'Sample Group']).agg(
+        Total_Tryptic=('Tryptic', 'sum'),
+        Total_Semi_tryptic=('Semi-tryptic', 'sum')
+    ).reset_index()
+    
+    # Merge verification data
+    stats_df = stats_df.merge(verification, on=['Protein_ID', 'Sample Group'])
+    
+    # Add Total_Peptides and verification column
+    stats_df['Total_Peptides'] = stats_df['Total_Tryptic'] + stats_df['Total_Semi_tryptic']
+    stats_df['Total_equals_Sum_Check'] = stats_df['Total_Peptides'] == len(peptide_level)
+    
+    # Display summary
+    print(f"Processed {len(df_grouped)} total observations")
+    print(f"Found {stats_df['Protein_ID'].nunique()} unique proteins")
+    print(f"Found {stats_df['Sample Group'].nunique()} sample groups")
+    
     return stats_df
+
 
 def create_global_summary(summary_pivot):
     """
